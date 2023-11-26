@@ -6,6 +6,13 @@ import os
 import matplotlib.pyplot as plt
 import random
 import json
+import timm 
+import torch
+from PIL import Image
+from torchvision import transforms
+from transformers import DistilBertModel, DistilBertTokenizer
+import numpy as np
+
 
 def kmeans_centroids(image_feat, text_feat, k=3):
     image_feat_std = StandardScaler().fit_transform(image_feat)
@@ -45,14 +52,54 @@ if __name__ == '__main__':
     with open('image_ids_5k.json', 'r') as file:
         image_ids_5k = [int(id_str) for id_str in json.load(file)]
     
-    sampled_img_ids = random.sample(image_ids_5k, 1000)
+    sampled_img_ids = random.sample(image_ids_5k, 20)
 
     with open('./mscoco_val/annotations/captions_val2014.json') as f:
         captions_data = json.load(f)
     
     # for img_info, annotation in zip(captions_data['images'], captions_data['annotations']):
 
+    model_image = timm.create_model('resnet50', pretrained=True)
+    model_image.eval()
+    model_text = DistilBertModel.from_pretrained('distilbert-base-uncased')
+    tokenizer_text = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+    model_text.eval()
 
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+    image_embeddings = []
+    text_embeddings = []
+    for img_info, annotation in zip(captions_data['images'], captions_data['annotations']):
+        if img_info['id'] not in sampled_img_ids:
+            continue
+
+        img_path = os.path.join(images_path, img_info['file_name'])
+        image = Image.open(img_path).convert('RGB')
+        image = transform(image).unsqueeze(0)
+
+        with torch.no_grad():
+            image_embeddings.append(model_image(image))
+        
+        caption = annotation['caption']
+        inputs = tokenizer_text(caption, return_tensors='pt')
+
+        with torch.no_grad():
+            text_embeddings.append(model_text(**inputs).last_hidden_state.mean(dim=1))
+    
+    image_feats = np.array(image_embeddings)
+    text_feats = np.array(text_embeddings)
+
+    image_feat_std = StandardScaler().fit_transform(image_feats)
+    text_feat_std = StandardScaler().fit_transform(text_feats)
+
+    image_centroids, text_centroids = kmeans_centroids(image_feat_std, text_feat_std, 5)
+
+    
 
     # For plotting the images
 
