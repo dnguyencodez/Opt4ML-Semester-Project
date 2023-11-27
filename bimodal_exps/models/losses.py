@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
+device = torch.device("mps")
 
 # https://github.com/Spijkervet/SimCLR/blob/master/simclr/modules/gather.py
 class GatherLayer(torch.autograd.Function):
@@ -69,15 +70,15 @@ class SogCLR_Loss(nn.Module):
         
         super(SogCLR_Loss, self).__init__()
         self.world_size = world_size
-        self.s_I = torch.zeros(N).cuda()
-        self.s_T = torch.zeros(N).cuda()
-        self.b_I = torch.zeros(N).cuda()
-        self.b_T = torch.zeros(N).cuda()
+        self.s_I = torch.zeros(N).to(device)
+        self.s_T = torch.zeros(N).to(device)
+        self.b_I = torch.zeros(N).to(device)
+        self.b_T = torch.zeros(N).to(device)
         self.gamma = gamma
         self.temperature = temperature
         self.eps = 1e-8
         self.bsz = bsz
-        self.mask_neg = (1.0 - torch.eye(bsz)).cuda()
+        self.mask_neg = (1.0 - torch.eye(bsz)).to(device)
         self.enable_surrogate = enable_surrogate
         self.c = surrogate_c # margin parameter for the square hinge loss
 
@@ -169,14 +170,14 @@ class iSogCLR_New_Loss(nn.Module):
         
         super(iSogCLR_New_Loss, self).__init__()
         self.world_size = world_size
-        self.s_I = torch.zeros(N).cuda()
-        self.s_T = torch.zeros(N).cuda()
-        self.b_I = torch.zeros(N).cuda()
-        self.b_T = torch.zeros(N).cuda()
+        self.s_I = torch.zeros(N).to(device)
+        self.s_T = torch.zeros(N).to(device)
+        self.b_I = torch.zeros(N).to(device)
+        self.b_T = torch.zeros(N).to(device)
         self.gamma = gamma
         self.eps = 1e-14
         self.bsz = bsz
-        self.mask_neg = (1.0 - torch.eye(bsz)).cuda()
+        self.mask_neg = (1.0 - torch.eye(bsz)).to(device)
 
         self.tau_min, self.tau_max = 0.005, 0.05
 
@@ -188,15 +189,15 @@ class iSogCLR_New_Loss(nn.Module):
         self.eta_init = 1e-5  
 
         if self.use_temp_net:
-            self.image_temp_gen = TempGenerator(feature_dim=feature_dim, M=256, tau_min=self.tau_min, tau_max=self.tau_max).cuda()
-            self.text_temp_gen = TempGenerator(feature_dim=feature_dim, M=256, tau_min=self.tau_min, tau_max=self.tau_max).cuda()
+            self.image_temp_gen = TempGenerator(feature_dim=feature_dim, M=256, tau_min=self.tau_min, tau_max=self.tau_max).to(device)
+            self.text_temp_gen = TempGenerator(feature_dim=feature_dim, M=256, tau_min=self.tau_min, tau_max=self.tau_max).to(device)
         else:
             self.beta_u = 0.5
             self.grad_clip = 5.0
-            self.tau_I = torch.ones(N).cuda() * tau_init
-            self.tau_T = torch.ones(N).cuda() * tau_init
-            self.u_I = torch.zeros(N).cuda()
-            self.u_T = torch.zeros(N).cuda()
+            self.tau_I = torch.ones(N).to(device) * tau_init
+            self.tau_T = torch.ones(N).to(device) * tau_init
+            self.u_I = torch.zeros(N).to(device)
+            self.u_T = torch.zeros(N).to(device)
 
 
     def forward(self, image_features, text_features, image_ids, text_ids, epoch, max_epoch):
@@ -299,7 +300,7 @@ class CyCLIP_Loss(nn.Module):
 
         self.world_size = world_size
         self.temperature = temperature
-        self.criterion = nn.CrossEntropyLoss().cuda()
+        self.criterion = nn.CrossEntropyLoss().to(device)
         self.cylambda_1 = cylambda_1
         self.cylambda_2 = cylambda_2
 
@@ -314,7 +315,7 @@ class CyCLIP_Loss(nn.Module):
         logits_text_per_image = (image_features @ text_features.t()) / self.temperature
         logits_image_per_text = logits_text_per_image.t()
 
-        target = torch.arange(batch_size).long().cuda()
+        target = torch.arange(batch_size).long().to(device)
 
         # contrastive loss, the same as CLIP
         contrastive_loss = (self.criterion(logits_text_per_image, target) + self.criterion(logits_image_per_text, target)) / 2.0 
@@ -407,21 +408,21 @@ class iSogCLR_New_v1_Loss(nn.Module):
         self.world_size = world_size
         self.gamma = gamma
 
-        self.s_I = torch.zeros(N).cuda()
-        self.s_T = torch.zeros(N).cuda()
-        self.b_I = torch.zeros(N).cuda()
-        self.b_T = torch.zeros(N).cuda()
+        self.s_I = torch.zeros(N).to(device)
+        self.s_T = torch.zeros(N).to(device)
+        self.b_I = torch.zeros(N).to(device)
+        self.b_T = torch.zeros(N).to(device)
         self.rho_I = rho_init
         self.rho_T = rho_init
         self.eps = eps
         self.batch_size = bsz
         self.grad_clip = 5.0
         
-        self.image_temp_gen = TempGenerator(feature_dim=feature_dim, M=M, tau_min=tau_min, tau_max=tau_max).cuda()
-        self.text_temp_gen = TempGenerator(feature_dim=feature_dim, M=M, tau_min=tau_min, tau_max=tau_max).cuda()
+        self.image_temp_gen = TempGenerator(feature_dim=feature_dim, M=M, tau_min=tau_min, tau_max=tau_max).to(device)
+        self.text_temp_gen = TempGenerator(feature_dim=feature_dim, M=M, tau_min=tau_min, tau_max=tau_max).to(device)
 
         self.neg_num = bsz - 1
-        self.mask_neg = (1.0 - torch.eye(bsz)).cuda()
+        self.mask_neg = (1.0 - torch.eye(bsz)).to(device)
 
 
     def forward(self, image_features, text_features, image_ids, text_ids, epoch):
@@ -518,16 +519,16 @@ class iSogCLR_New_v2_Loss(nn.Module):
         self.tau_max = tau_max
         self.tau_init = tau_init
 
-        self.s_I = torch.zeros(N).cuda()
-        self.s_T = torch.zeros(N).cuda()
-        self.tau_I = torch.ones(N).cuda() * self.tau_init
-        self.tau_T = torch.ones(N).cuda() * self.tau_init
-        self.u_I = torch.zeros(N).cuda()
-        self.u_T = torch.zeros(N).cuda()
-        self.b_pos = torch.zeros([]).cuda()
-        self.b_I = torch.zeros(N).cuda()
-        self.b_T = torch.zeros(N).cuda()
-        self.lamda = torch.ones([]).cuda() * lamda_init # first assume lamda is positive, which is initialized to 1.0
+        self.s_I = torch.zeros(N).to(device)
+        self.s_T = torch.zeros(N).to(device)
+        self.tau_I = torch.ones(N).to(device) * self.tau_init
+        self.tau_T = torch.ones(N).to(device) * self.tau_init
+        self.u_I = torch.zeros(N).to(device)
+        self.u_T = torch.zeros(N).to(device)
+        self.b_pos = torch.zeros([]).to(device)
+        self.b_I = torch.zeros(N).to(device)
+        self.b_T = torch.zeros(N).to(device)
+        self.lamda = torch.ones([]).to(device) * lamda_init # first assume lamda is positive, which is initialized to 1.0
         self.rho_I = rho_init
         self.rho_T = rho_init
         self.eps = eps
@@ -535,7 +536,7 @@ class iSogCLR_New_v2_Loss(nn.Module):
         self.beta_u = beta_u
         self.batch_size = bsz
         self.grad_clip = 5.0
-        self.mask_neg = (1.0 - torch.eye(bsz)).cuda()
+        self.mask_neg = (1.0 - torch.eye(bsz)).to(device)
 
 
     def forward(self, image_features, text_features, image_ids, text_ids, epoch, max_epoch):
@@ -657,10 +658,10 @@ class onlineCLR_Loss(nn.Module):
         self.pT = temperature*10
         self.nT = temperature
         
-        self.u_p = torch.zeros(1).cuda() 
-        self.u_n = torch.zeros(1).cuda()
-        self.c_p = torch.zeros(1).cuda()
-        self.c_n = torch.zeros(1).cuda() 
+        self.u_p = torch.zeros(1).to(device) 
+        self.u_n = torch.zeros(1).to(device)
+        self.c_p = torch.zeros(1).to(device)
+        self.c_n = torch.zeros(1).to(device) 
              
         self.gamma = gamma
 
@@ -671,7 +672,7 @@ class onlineCLR_Loss(nn.Module):
 
         batch_size = hidden1.shape[0]
         
-        labels = torch.eye(batch_size).cuda() # identity matrix
+        labels = torch.eye(batch_size).to(device) # identity matrix
 
         logits_ab = torch.matmul(hidden1, hidden2.T)
         logits_ba = torch.matmul(hidden2, hidden1.T)
@@ -692,10 +693,10 @@ class onlineCLR_Loss(nn.Module):
         neg_logits2_exp = torch.exp((neg_logits2-max_neg_logits)/self.nT)*neg_mask
         pos_logits2_exp = torch.exp((-pos_logits2-max_pos_logits)/self.pT)*labels
 
-        self.u_n = (1 - self.gamma) * self.u_n.cuda() * torch.exp((self.c_n-max_neg_logits)/self.nT) + self.gamma * torch.sum(neg_logits1_exp+neg_logits2_exp).detach()
-        self.u_p = (1 - self.gamma) * self.u_p.cuda() * torch.exp((self.c_p-max_pos_logits)/self.pT) + self.gamma * torch.sum(pos_logits1_exp+pos_logits2_exp).detach()
-        self.c_n = max_neg_logits.cuda()
-        self.c_p = max_pos_logits.cuda()
+        self.u_n = (1 - self.gamma) * self.u_n.to(device) * torch.exp((self.c_n-max_neg_logits)/self.nT) + self.gamma * torch.sum(neg_logits1_exp+neg_logits2_exp).detach()
+        self.u_p = (1 - self.gamma) * self.u_p.to(device) * torch.exp((self.c_p-max_pos_logits)/self.pT) + self.gamma * torch.sum(pos_logits1_exp+pos_logits2_exp).detach()
+        self.c_n = max_neg_logits.to(device)
+        self.c_p = max_pos_logits.to(device)
 
         p_neg_weights1 = (neg_logits1_exp/self.u_n).detach()
         p_pos_weights1 = (pos_logits1_exp/self.u_p).detach()
