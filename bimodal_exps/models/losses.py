@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from kmeans_test import kmeans_centroids
 
 
 # https://github.com/Spijkervet/SimCLR/blob/master/simclr/modules/gather.py
@@ -55,6 +56,59 @@ class CLIP_Loss(nn.Module):
             sim = torch.einsum('i d, j d -> i j', text_features, image_features) / self.temperature
             labels = torch.arange(image_features.shape[0], device=image_features.device)
             total_loss = (F.cross_entropy(sim, labels) + F.cross_entropy(sim.t(), labels)) / 2
+
+        return total_loss
+    
+class CLIP_KNN_Loss(nn.Module):
+
+    def __init__(self,knn_clusters, world_size=8, temperature=0.01, personalized_tau=False, image_tau=None, text_tau=None):
+        super(CLIP_Loss, self).__init__()
+        self.world_size = world_size
+        self.temperature = temperature
+        self.personalized_tau = personalized_tau # if true, then temperatures are learnable
+        self.image_tau = image_tau
+        self.text_tau = text_tau
+        self.image_centroids = None
+        self.text_centroids = None
+        self.image_cluster_index = None
+        self.text_cluster_index = None
+        self.k = knn_clusters
+
+    def forward(self, image_features, text_features, image_centroids,text_centroids, image_idx=None, text_idx=None):
+        if self.world_size > 1:
+            image_features = torch.cat(GatherLayer.apply(image_features), dim=0)
+            text_features = torch.cat(GatherLayer.apply(text_features), dim=0)
+
+        
+
+        with torch.no_grad():
+            # Add centroids to feature list
+            if self.image_centroids is None:
+                image_feat_new = image_features
+                text_feat_new = text_features
+            else:
+                image_feat_new = torch.cat([image_features, self.image_centroids], dim=0)
+                text_feat_new = torch.cat([text_features, self.text_centroids], dim=0)
+            self.image_centroids, self.text_centroids, self.image_cluster_index, self.text_cluster_index = kmeans_centroids(image_feat_new, text_feat_new,self.knn_clusters)
+
+        sim_image = torch.einsum('i d, j d -> i j', image_features, self.text_centroids) 
+        sim_text = torch.einsum('i d, j d -> i j', text_features, self.image_centroids) 
+        self_sim = torch.sum(image_features * text_features, dim=1) 
+
+        #concatenate all similarities
+        sim_image = torch.cat([sim_image, self_sim], dim=1)
+        sim_text = torch.cat([sim_text, self_sim], dim=1)
+        class_probs = torch.zeros_like(sim_image)
+        class_probs[:,-1] = 1.0
+        total_loss = (F.cross_entropy(sim_image, class_probs) + F.cross_entropy(sim_text.t(), class_probs)) / 2
+
+        if self.personalized_tau:
+            image_temp = self.image_tau[image_idx]
+            text_temp = self.text_tau[text_idx]
+            total_loss = (F.cross_entropy(sim_text / text_temp, class_probs) + F.cross_entropy(sim_image / image_temp, class_probs)) / 2
+
+        else:
+            total_loss = (F.cross_entropy(sim_text / self.temperature, class_probs) + F.cross_entropy(sim_image / self.temperature, class_probs)) / 2
 
         return total_loss
 

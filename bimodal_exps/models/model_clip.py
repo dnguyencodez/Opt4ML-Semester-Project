@@ -3,7 +3,7 @@ from functools import partial
 import timm
 from transformers import AutoModel, RobertaModel
 
-from models.losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, VICReg_Loss
+from models.losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, VICReg_Loss, CLIP_KNN_Loss
 from models.losses import iSogCLR_New_v2_Loss, iSogCLR_New_v1_Loss, onlineCLR_Loss, iSogCLR_New_Loss
 
 import torch
@@ -35,6 +35,7 @@ class CLIP(nn.Module):
                  vicreg_std_coeff = 25.0,
                  use_temp_net = True,
                  alpha = 1.0,
+                 knn_cluster_factor=10,
                  distributed=True,
                  ):
         super().__init__()
@@ -69,11 +70,13 @@ class CLIP(nn.Module):
 
         self.ita_type = ita_type
 
-        if self.ita_type == 'clip':
+        if (self.ita_type == 'clip'):
             if not personalized_tau:
                 self.criterion = CLIP_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp)
             else:
                 self.criterion = CLIP_Loss(world_size=world_size, personalized_tau=personalized_tau, image_tau=self.image_temp, text_tau=self.text_temp)
+        elif (self.ita_type == 'clip_knn'):
+            self.criterion = CLIP_KNN_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp,knn_clusters = bsz//knn_cluster_factor)
 
         elif self.ita_type == 'cyclip':
             self.criterion = CyCLIP_Loss(world_size=world_size, temperature=self.temp)
@@ -81,7 +84,7 @@ class CLIP(nn.Module):
         elif self.ita_type == 'vicreg':
             self.criterion = VICReg_Loss(world_size=world_size, dim_size=embed_dim, sim_coeff=vicreg_sim_coeff, std_coeff=vicreg_std_coeff)
 
-        elif self.ita_type == 'sogclr':
+        elif (self.ita_type == 'sogclr'):
             # self.criterion = SogCLR_Loss(world_size=world_size, gamma=sogclr_gamma, temperature=self.temp, bsz=bsz, enable_surrogate=enable_surrogate, 
             #                              surrogate_c=surrogate_c, lamda_rho=lamda_rho, lamda_init=lamda_init)
             self.criterion = SogCLR_Loss(world_size=world_size, gamma=sogclr_gamma, temperature=self.temp, bsz=bsz)
@@ -132,6 +135,26 @@ class CLIP(nn.Module):
         info_dict = {}
 
         if self.ita_type in ['clip', 'cyclip']:
+            if self.personalized_tau:
+                if self.distributed:
+                    image_ids = concat_all_gather(idx)
+                    text_ids = concat_all_gather(text_idx)
+                else:
+                    image_ids, text_ids = idx, text_idx
+                loss_ita = self.criterion(image_feat, text_feat, image_ids, text_ids)
+                info_dict['avg_image_tau'] = self.criterion.image_tau[image_ids].mean()
+                info_dict['avg_text_tau'] = self.criterion.text_tau[text_ids].mean()
+
+            else:
+                loss_ita = self.criterion(image_feat, text_feat)
+                if not self.learnable_temp:
+                    avg_tau = torch.tensor(self.temp)
+                else:
+                    avg_tau = self.temp
+                info_dict['avg_image_tau'] = avg_tau
+                info_dict['avg_text_tau'] = avg_tau
+        
+        elif self.ita_type == 'clip_knn':
             if self.personalized_tau:
                 if self.distributed:
                     image_ids = concat_all_gather(idx)
@@ -205,11 +228,13 @@ class CLIP(nn.Module):
             loss_ita = self.criterion(image_feat, text_feat)
             info_dict['avg_text_tau'] = 0.0
             info_dict['avg_image_tau'] = 0.0
-
         else:
             raise NotImplementedError
 
-        return loss_ita, info_dict
+        if self.ita == 'clip_knn':
+            return image_feat, text_feat
+        else:
+            return loss_ita, info_dict
 
 
 

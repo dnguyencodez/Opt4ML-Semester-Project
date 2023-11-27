@@ -61,12 +61,6 @@ def train(model, data_loader, optimizer, tokenizer, epoch, max_epoch, warmup_ste
     print_freq = 50
     step_size = 100
     warmup_iterations = warmup_steps*step_size  
-    Kmeans_batch_size = args.knn_batch_factor *args.batch_size_train
-    image_feat_knn = []
-    text_feat_knn = []
-    image_idx_knn = []
-    text_idx_knn = []
-    
 
     for i,(image, text, idx, text_idx) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         optimizer.zero_grad()
@@ -79,35 +73,16 @@ def train(model, data_loader, optimizer, tokenizer, epoch, max_epoch, warmup_ste
         # set learning rate for temperature network
         optimizer.param_groups[2]["lr"] = optimizer.param_groups[0]["lr"] / 10.0
 
-        if args.ita_type == 'clip_knn':
-            if grad_scaler is None:
-                image_feat,text_feat = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
-                image_feat_knn.append(image_feat)
-                text_feat_knn.append(text_feat)
-                image_idx_knn.append(idx)
-                text_idx_knn.append(text_idx)
-
-                if i%Kmeans_batch_size==0:
-                    
-                    image_feat_knn = []
-                    text_feat_knn = []
-                    image_idx_knn = []
-                    text_idx_knn = []
-            else:
-                with torch.cuda.amp.autocast():
-                    image_feat, text_feat = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
-
+        if grad_scaler is None:
+            loss_ita, info_dict = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
+            loss_ita.backward()
+            optimizer.step()
         else:
-            if grad_scaler is None:
+            with torch.cuda.amp.autocast():
                 loss_ita, info_dict = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
-                loss_ita.backward()
-                optimizer.step()
-            else:
-                with torch.cuda.amp.autocast():
-                    loss_ita, info_dict = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
-                grad_scaler.scale(loss_ita).backward()
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
+            grad_scaler.scale(loss_ita).backward()
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
         
         metric_logger.update(loss_ita=loss_ita.item())
 
@@ -445,19 +420,11 @@ def main(args):
 
     #### Model #### 
     print("Creating model")
-    if args.ita_type == 'clip_knn':
-        model = CLIP(image_encoder=args.image_encoder, text_encoder=args.text_encoder, embed_dim=args.embed_dim, init_model=args.init_model, bsz=args.batch_size_train*args.world_size,
-                    world_size=args.world_size, ita_type=args.ita_type, sogclr_gamma=args.sogclr_gamma, rho_I=args.rho_I, rho_T=args.rho_T, tau_init=args.tau_init,
-                    eta_init=args.eta_init, beta_u=args.beta_u, temp=args.temp, learnable_temp=args.learnable_temp,
-                    vicreg_sim_coeff=args.vicreg_sim_coeff, vicreg_std_coeff=args.vicreg_std_coeff, personalized_tau=args.personalized_tau, 
-                    use_temp_net=args.isogclr_temp_net, alpha=args.alpha,knn_cluster_factor = args.knn_cluster_factor, distributed=args.distributed)
-    else:
-        model = CLIP(image_encoder=args.image_encoder, text_encoder=args.text_encoder, embed_dim=args.embed_dim, init_model=args.init_model, bsz=args.batch_size_train*args.world_size,
-                    world_size=args.world_size, ita_type=args.ita_type, sogclr_gamma=args.sogclr_gamma, rho_I=args.rho_I, rho_T=args.rho_T, tau_init=args.tau_init,
-                    eta_init=args.eta_init, beta_u=args.beta_u, temp=args.temp, learnable_temp=args.learnable_temp,
-                    vicreg_sim_coeff=args.vicreg_sim_coeff, vicreg_std_coeff=args.vicreg_std_coeff, personalized_tau=args.personalized_tau, 
-                    use_temp_net=args.isogclr_temp_net, alpha=args.alpha, distributed=args.distributed)
-    
+    model = CLIP(image_encoder=args.image_encoder, text_encoder=args.text_encoder, embed_dim=args.embed_dim, init_model=args.init_model, bsz=args.batch_size_train*args.world_size,
+                  world_size=args.world_size, ita_type=args.ita_type, sogclr_gamma=args.sogclr_gamma, rho_I=args.rho_I, rho_T=args.rho_T, tau_init=args.tau_init,
+                  eta_init=args.eta_init, beta_u=args.beta_u, temp=args.temp, learnable_temp=args.learnable_temp,
+                  vicreg_sim_coeff=args.vicreg_sim_coeff, vicreg_std_coeff=args.vicreg_std_coeff, personalized_tau=args.personalized_tau, 
+                  use_temp_net=args.isogclr_temp_net, alpha=args.alpha, distributed=args.distributed)
     model = model.to(device)
 
     if args.evaluate or args.ita_type == 'isogclr_denoise':
@@ -672,7 +639,7 @@ if __name__ == '__main__':
 
     # loss config
     parser.add_argument('--ita_type', required=True, choices=['clip', 'cyclip', 'vicreg', 'sogclr', 'sogclr_dro', 
-                        'isogclr_new_v2', 'isogclr_new_v1', 'isogclr_new', 'onlineclr','clip_knn'])
+                        'isogclr_new_v2', 'isogclr_new_v1', 'isogclr_new', 'onlineclr'])
     parser.add_argument('--vicreg_sim_coeff', default=25.0, type=float)
     parser.add_argument('--vicreg_std_coeff', default=25.0, type=float)
     parser.add_argument('--sogclr_gamma', default=0.8, type=float)
@@ -697,9 +664,6 @@ if __name__ == '__main__':
 
     # extract data from the cc3m dataset
     parser.add_argument('--extract_data', action='store_true')
-
-    #clip_knn args
-    parser.add_argument('knn_cluster_factor', default=10, type=int)
 
     # zero-shot transfer
     # parser.add_argument('--zs_dataset', required=True, choices=['cifar10', 'cifar100', 'imagenet'])
