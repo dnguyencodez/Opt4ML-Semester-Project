@@ -61,11 +61,6 @@ def train(model, data_loader, optimizer, tokenizer, epoch, max_epoch, warmup_ste
     print_freq = 50
     step_size = 100
     warmup_iterations = warmup_steps*step_size  
-    Kmeans_batch_size = args.knn_batch_factor *args.batch_size_train
-    image_feat_knn = []
-    text_feat_knn = []
-    image_idx_knn = []
-    text_idx_knn = []
     
 
     for i,(image, text, idx, text_idx) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
@@ -79,35 +74,16 @@ def train(model, data_loader, optimizer, tokenizer, epoch, max_epoch, warmup_ste
         # set learning rate for temperature network
         optimizer.param_groups[2]["lr"] = optimizer.param_groups[0]["lr"] / 10.0
 
-        if args.ita_type == 'clip_knn':
-            if grad_scaler is None:
-                image_feat,text_feat = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
-                image_feat_knn.append(image_feat)
-                text_feat_knn.append(text_feat)
-                image_idx_knn.append(idx)
-                text_idx_knn.append(text_idx)
-
-                if i%Kmeans_batch_size==0:
-                    
-                    image_feat_knn = []
-                    text_feat_knn = []
-                    image_idx_knn = []
-                    text_idx_knn = []
-            else:
-                with torch.cuda.amp.autocast():
-                    image_feat, text_feat = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
-
+        if grad_scaler is None:
+            loss_ita, info_dict = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
+            loss_ita.backward()
+            optimizer.step()
         else:
-            if grad_scaler is None:
+            with torch.cuda.amp.autocast():
                 loss_ita, info_dict = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
-                loss_ita.backward()
-                optimizer.step()
-            else:
-                with torch.cuda.amp.autocast():
-                    loss_ita, info_dict = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
-                grad_scaler.scale(loss_ita).backward()
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
+            grad_scaler.scale(loss_ita).backward()
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
         
         metric_logger.update(loss_ita=loss_ita.item())
 
@@ -699,7 +675,7 @@ if __name__ == '__main__':
     parser.add_argument('--extract_data', action='store_true')
 
     #clip_knn args
-    parser.add_argument('knn_cluster_factor', default=10, type=int)
+    parser.add_argument('--knn_cluster_factor', default=10, type=int)
 
     # zero-shot transfer
     # parser.add_argument('--zs_dataset', required=True, choices=['cifar10', 'cifar100', 'imagenet'])
@@ -727,4 +703,5 @@ if __name__ == '__main__':
 
     json.dump(args.__dict__, open(os.path.join(args.output_dir, 'args.json'), 'w'), indent=2) 
     
+    print("cwd:",os.getcwd())
     main(args)

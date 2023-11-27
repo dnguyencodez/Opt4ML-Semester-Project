@@ -230,11 +230,7 @@ class CLIP(nn.Module):
             info_dict['avg_image_tau'] = 0.0
         else:
             raise NotImplementedError
-
-        if self.ita == 'clip_knn':
-            return image_feat, text_feat
-        else:
-            return loss_ita, info_dict
+        return loss_ita, info_dict
 
 
 

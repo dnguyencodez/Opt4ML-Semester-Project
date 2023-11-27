@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from kmeans_test import kmeans_centroids
+from models.kmeans import kmeans_centroids
 
 
 # https://github.com/Spijkervet/SimCLR/blob/master/simclr/modules/gather.py
