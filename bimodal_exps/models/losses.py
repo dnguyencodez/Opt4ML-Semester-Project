@@ -62,7 +62,7 @@ class CLIP_Loss(nn.Module):
 class CLIP_KNN_Loss(nn.Module):
 
     def __init__(self,knn_clusters, world_size=8, temperature=0.01, personalized_tau=False, image_tau=None, text_tau=None):
-        super(CLIP_Loss, self).__init__()
+        super(CLIP_KNN_Loss, self).__init__()
         self.world_size = world_size
         self.temperature = temperature
         self.personalized_tau = personalized_tau # if true, then temperatures are learnable
@@ -74,7 +74,7 @@ class CLIP_KNN_Loss(nn.Module):
         self.text_cluster_index = None
         self.k = knn_clusters
 
-    def forward(self, image_features, text_features, image_centroids,text_centroids, image_idx=None, text_idx=None):
+    def forward(self, image_features, text_features, image_idx=None, text_idx=None):
         if self.world_size > 1:
             image_features = torch.cat(GatherLayer.apply(image_features), dim=0)
             text_features = torch.cat(GatherLayer.apply(text_features), dim=0)
@@ -89,19 +89,22 @@ class CLIP_KNN_Loss(nn.Module):
             else:
                 image_feat_new = torch.cat([image_features, self.image_centroids], dim=0)
                 text_feat_new = torch.cat([text_features, self.text_centroids], dim=0)
-            self.image_centroids, self.text_centroids, self.image_cluster_index, self.text_cluster_index = kmeans_centroids(image_feat_new, text_feat_new,self.knn_clusters)
+            self.image_centroids, self.text_centroids, self.image_cluster_index, self.text_cluster_index = kmeans_centroids(image_feat_new, text_feat_new,self.k)
 
+        # print("image_centroids shape:", self.image_centroids.shape,"text_centroids shape:", self.text_centroids.shape)
+        # print("image_features shape:", image_features.shape,"text_features shape:", text_features.shape)
         sim_image = torch.einsum('i d, j d -> i j', image_features, self.text_centroids) 
         sim_text = torch.einsum('i d, j d -> i j', text_features, self.image_centroids) 
-        self_sim = torch.sum(image_features * text_features, dim=1) 
+        self_sim = torch.sum(image_features * text_features, dim=1, keepdim=True) 
 
         #concatenate all similarities
+        # print("sim_image shape:", sim_image.shape,"sim_text shape:", sim_text.shape,"self_sim shape:", self_sim.shape)
         sim_image = torch.cat([sim_image, self_sim], dim=1)
         sim_text = torch.cat([sim_text, self_sim], dim=1)
+        # print("sim_image shape:", sim_image.shape,"sim_text shape:", sim_text.shape)
         class_probs = torch.zeros_like(sim_image)
         class_probs[:,-1] = 1.0
-        total_loss = (F.cross_entropy(sim_image, class_probs) + F.cross_entropy(sim_text.t(), class_probs)) / 2
-
+        # print("class_probs shape:", class_probs.shape)
         if self.personalized_tau:
             image_temp = self.image_tau[image_idx]
             text_temp = self.text_tau[text_idx]

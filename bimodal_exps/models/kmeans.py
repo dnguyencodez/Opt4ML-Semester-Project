@@ -7,12 +7,16 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import pairwise_distances_argmin
 import numpy as np
 from sklearn.decomposition import PCA
+import torch
 
 def kmeans_centroids(image_feat, text_feat, k=3):
-    image_feat_2d = PCA(n_components=2).fit_transform(image_feat)
-    text_feat_2d = PCA(n_components=2).fit_transform(text_feat)
-    image_feat_std = StandardScaler().fit_transform(image_feat_2d)
-    text_feat_std = StandardScaler().fit_transform(text_feat_2d)
+    # image_feat_2d = PCA(n_components=2).fit_transform(image_feat.cpu().numpy())
+    # text_feat_2d = PCA(n_components=2).fit_transform(text_feat.cpu().numpy())
+    # image_feat_std = StandardScaler().fit_transform(image_feat_2d)
+    # text_feat_std = StandardScaler().fit_transform(text_feat_2d)
+
+    image_feat_std = StandardScaler().fit_transform(image_feat.cpu().numpy())
+    text_feat_std = StandardScaler().fit_transform(text_feat.cpu().numpy())
 
     # print(len(image_feat_std))
 
@@ -25,7 +29,12 @@ def kmeans_centroids(image_feat, text_feat, k=3):
     image_cluster_idxs = pairwise_distances_argmin(image_feat_std, image_centroids)
     text_cluster_idxs = pairwise_distances_argmin(text_feat_std, text_centroids)
 
-    return image_centroids, image_cluster_idxs, text_centroids, text_cluster_idxs
+    image_centroids = torch.from_numpy(image_centroids).to(image_feat.device)
+    text_centroids = torch.from_numpy(text_centroids).to(text_feat.device)
+    image_cluster_idxs = torch.from_numpy(image_cluster_idxs).to(image_feat.device)
+    text_cluster_idxs = torch.from_numpy(text_cluster_idxs).to(text_feat.device)
+
+    return image_centroids, text_centroids,image_cluster_idxs, text_cluster_idxs
 
 
 if __name__ == '__main__':

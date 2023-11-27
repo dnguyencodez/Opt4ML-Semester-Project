@@ -1,6 +1,8 @@
-mscoco_val.tar
-clip_train.tar.gz
-cc3m_subset_100k.tar.gz
 datasets/
 clip_train/
 checkpoints/
+Logs/
+output/
+mscoco_val.tar
+clip_train.tar.gz
+cc3m_subset_100k.tar.gz

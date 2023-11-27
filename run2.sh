@@ -9,17 +9,17 @@ train_file=${data}_train_subset.json
 gamma=0.8
 epochs=30
 
-echo "Starting clip knn training"
+echo "Starting sogclr training"
 
-CUDA_VISIBLE_DEVICES=0 python ./bimodal_exps/clip.py \
+CUDA_VISIBLE_DEVICES=1 python ./bimodal_exps/clip.py \
     --data_path ${data_path} \
     --ann_path ${ann_path} \
     --train_file ${train_file} \
     --train_image_root ${train_image_root} \
-    --output_dir output/clip_knn_${data}_g${gamma}_e${epochs} \
+    --output_dir output/sogclr_${data}_g${gamma}_e${epochs} \
     --init_model \
     --use_amp \
-    --ita_type clip_knn \
+    --ita_type sogclr \
     --tau_init 0.01 \
     --sogclr_gamma ${gamma} \
     --eta_init 0.03 --sched cosine \
