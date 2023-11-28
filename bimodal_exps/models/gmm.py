@@ -10,7 +10,7 @@ Avoids convergence to a local minimum and improves clusters generated with K-Mea
 """
 
 """
-Maybe run this function only once at the beginning of the first batch
+Maybe run this function only once at the beginning of the first batch to reduce time complexity
 """
 # Determine the optimal k and return the model initialized with it
 def get_gmm_with_optimal_k(data, max_k):

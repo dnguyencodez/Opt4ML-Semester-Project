@@ -11,7 +11,7 @@ import torch
 from sklearn.metrics import silhouette_score
 
 """
-Maybe run this function only once at the beginning of the first batch
+Maybe run this function only once at the beginning of the first batch to reduce time complextiy
 """
 # Determine the optimal k and return the model initialized with it
 def get_kmeans_with_optimal_k(data, max_k):
