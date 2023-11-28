@@ -8,8 +8,29 @@ from sklearn.metrics import pairwise_distances_argmin
 import numpy as np
 from sklearn.decomposition import PCA
 import torch
+from sklearn.metrics import silhouette_score
 
-def kmeans_centroids(image_feat, text_feat, k=3):
+"""
+Maybe run this function only once at the beginning of the first batch
+"""
+# Determine the optimal k and return the model initialized with it
+def get_kmeans_with_optimal_k(data, max_k):
+    silhoutte_scores = [0] * (max_k)
+    silhoutte_scores[0] = 1e10
+    for k in range(2, max_k+1):
+        kmeans = KMeans(n_clusters=k)
+        kmeans.fit(data)
+        labels = kmeans.labels_
+        silhoutte_scores.append(silhouette_score(data, labels))
+    
+    optimal_k = np.argmin(silhoutte_scores) + 1
+    # print(optimal_k)
+    final_kmeans = KMeans(n_clusters=optimal_k)
+    final_kmeans.fit(data)
+
+    return final_kmeans
+
+def kmeans_centroids(image_feat, text_feat, max_k=20):
     # image_feat_2d = PCA(n_components=2).fit_transform(image_feat.cpu().numpy())
     # text_feat_2d = PCA(n_components=2).fit_transform(text_feat.cpu().numpy())
     # image_feat_std = StandardScaler().fit_transform(image_feat_2d)
@@ -20,8 +41,10 @@ def kmeans_centroids(image_feat, text_feat, k=3):
 
     # print(len(image_feat_std))
 
-    kmean_image = KMeans(n_clusters=k).fit(image_feat_std)
-    kmean_text = KMeans(n_clusters=k).fit(text_feat_std)
+    # kmean_image = KMeans(n_clusters=k).fit(image_feat_std)
+    # kmean_text = KMeans(n_clusters=k).fit(text_feat_std)
+    kmean_image = get_kmeans_with_optimal_k(image_feat_std, max_k)
+    kmean_text = get_kmeans_with_optimal_k(text_feat_std, max_k)
 
     image_centroids = kmean_image.cluster_centers_
     text_centroids = kmean_text.cluster_centers_
