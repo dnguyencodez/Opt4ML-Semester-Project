@@ -3,7 +3,7 @@ from functools import partial
 import timm
 from transformers import AutoModel, RobertaModel
 
-from models.losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, VICReg_Loss, CLIP_KNN_Loss
+from models.losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, VICReg_Loss, CLIP_Cluster_Loss
 from models.losses import iSogCLR_New_v2_Loss, iSogCLR_New_v1_Loss, onlineCLR_Loss, iSogCLR_New_Loss
 
 import torch
@@ -35,7 +35,8 @@ class CLIP(nn.Module):
                  vicreg_std_coeff = 25.0,
                  use_temp_net = True,
                  alpha = 1.0,
-                 knn_cluster_factor=10,
+                 n_clusters_max=50,
+                 centroid_buf_size=128,
                  distributed=True,
                  ):
         super().__init__()
@@ -76,8 +77,10 @@ class CLIP(nn.Module):
             else:
                 self.criterion = CLIP_Loss(world_size=world_size, personalized_tau=personalized_tau, image_tau=self.image_temp, text_tau=self.text_temp)
         elif (self.ita_type == 'clip_knn'):
-            self.criterion = CLIP_KNN_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp,knn_clusters = bsz//knn_cluster_factor)
-
+            self.criterion = CLIP_Cluster_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp,n_clusters_max = n_clusters_max,centroid_buf_size=centroid_buf_size)
+        elif (self.ita_type == 'clip_gmm'):
+            self.criterion = CLIP_Cluster_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp,n_clusters_max = n_clusters_max,centroid_buf_size=centroid_buf_size,clustering_type='gmm')
+        
         elif self.ita_type == 'cyclip':
             self.criterion = CyCLIP_Loss(world_size=world_size, temperature=self.temp)
 
@@ -154,7 +157,7 @@ class CLIP(nn.Module):
                 info_dict['avg_image_tau'] = avg_tau
                 info_dict['avg_text_tau'] = avg_tau
         
-        elif self.ita_type == 'clip_knn':
+        elif self.ita_type in ['clip_knn','clip_gmm']:
             if self.personalized_tau:
                 if self.distributed:
                     image_ids = concat_all_gather(idx)

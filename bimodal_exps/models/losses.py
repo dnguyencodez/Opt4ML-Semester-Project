@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from models.kmeans import kmeans_centroids
+from models.gmm import gmm_centroids
 
 
 # https://github.com/Spijkervet/SimCLR/blob/master/simclr/modules/gather.py
@@ -59,9 +60,9 @@ class CLIP_Loss(nn.Module):
 
         return total_loss
     
-class CLIP_KNN_Loss(nn.Module):
+class CLIP_Cluster_Loss(nn.Module):
 
-    def __init__(self,knn_clusters, world_size=8, temperature=0.01, personalized_tau=False, image_tau=None, text_tau=None):
+    def __init__(self,n_clusters_max, world_size=8, temperature=0.01, personalized_tau=False, image_tau=None, text_tau=None,clustering_type='kmeans',centroid_buf_size=128):
         super(CLIP_KNN_Loss, self).__init__()
         self.world_size = world_size
         self.temperature = temperature
@@ -70,11 +71,27 @@ class CLIP_KNN_Loss(nn.Module):
         self.text_tau = text_tau
         self.image_centroids = None
         self.text_centroids = None
-        self.image_cluster_index = None
-        self.text_cluster_index = None
-        self.k = knn_clusters
+        # self.image_cluster_index = None
+        # self.text_cluster_index = None
+        self.n_max = n_clusters_max
+        self.clustering_type = clustering_type
+        self.centroid_buf_size = centroid_buf_size
 
-    def forward(self, image_features, text_features, image_idx=None, text_idx=None):
+    def add_centroids(self, image_centroids_new, text_centroids_new):
+        if self.image_centroids is None:
+            self.image_centroids = image_centroids_new
+            self.text_centroids = text_centroids_new
+        else:
+            self.image_centroids = torch.cat([self.image_centroids,image_centroids_new],dim=0)
+            self.text_centroids = torch.cat([self.text_centroids,text_centroids_new],dim=0)
+
+        if self.image_centroids.shape[0] > self.centroid_buf_size:
+            self.image_centroids = self.image_centroids[1:]
+            self.text_centroids = self.text_centroids[1:]
+
+
+
+    def forward(self, image_centroids_new, text_features, image_idx=None, text_idx=None):
         if self.world_size > 1:
             image_features = torch.cat(GatherLayer.apply(image_features), dim=0)
             text_features = torch.cat(GatherLayer.apply(text_features), dim=0)
@@ -89,8 +106,15 @@ class CLIP_KNN_Loss(nn.Module):
             else:
                 image_feat_new = torch.cat([image_features, self.image_centroids], dim=0)
                 text_feat_new = torch.cat([text_features, self.text_centroids], dim=0)
-            self.image_centroids, self.text_centroids, self.image_cluster_index, self.text_cluster_index = kmeans_centroids(image_feat_new, text_feat_new,self.k)
+            
+            if self.clustering_type == 'kmeans':
+                image_centroids_new, text_centroids_new, _, _ = kmeans_centroids(image_feat_new, text_feat_new,self.n_max)
+            
+            elif self.clustering_type == 'gmm':
+                image_centroids_new, text_centroids_new,_,_ = gmm_centroids(image_feat_new, text_feat_new,self.n_max)
 
+            self.add_centroids(image_centroids_new, text_centroids_new)
+            
         # print("image_centroids shape:", self.image_centroids.shape,"text_centroids shape:", self.text_centroids.shape)
         # print("image_features shape:", image_features.shape,"text_features shape:", text_features.shape)
         sim_image = torch.einsum('i d, j d -> i j', image_features, self.text_centroids) 

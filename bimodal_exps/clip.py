@@ -426,7 +426,7 @@ def main(args):
                     world_size=args.world_size, ita_type=args.ita_type, sogclr_gamma=args.sogclr_gamma, rho_I=args.rho_I, rho_T=args.rho_T, tau_init=args.tau_init,
                     eta_init=args.eta_init, beta_u=args.beta_u, temp=args.temp, learnable_temp=args.learnable_temp,
                     vicreg_sim_coeff=args.vicreg_sim_coeff, vicreg_std_coeff=args.vicreg_std_coeff, personalized_tau=args.personalized_tau, 
-                    use_temp_net=args.isogclr_temp_net, alpha=args.alpha,knn_cluster_factor = args.knn_cluster_factor, distributed=args.distributed)
+                    use_temp_net=args.isogclr_temp_net, alpha=args.alpha,n_clusters_max = args.n_clusters_max,centroid_buf_size = args.centroid_buf_size , distributed=args.distributed)
     else:
         model = CLIP(image_encoder=args.image_encoder, text_encoder=args.text_encoder, embed_dim=args.embed_dim, init_model=args.init_model, bsz=args.batch_size_train*args.world_size,
                     world_size=args.world_size, ita_type=args.ita_type, sogclr_gamma=args.sogclr_gamma, rho_I=args.rho_I, rho_T=args.rho_T, tau_init=args.tau_init,
@@ -648,7 +648,7 @@ if __name__ == '__main__':
 
     # loss config
     parser.add_argument('--ita_type', required=True, choices=['clip', 'cyclip', 'vicreg', 'sogclr', 'sogclr_dro', 
-                        'isogclr_new_v2', 'isogclr_new_v1', 'isogclr_new', 'onlineclr','clip_knn'])
+                        'isogclr_new_v2', 'isogclr_new_v1', 'isogclr_new', 'onlineclr','clip_knn','clip_gmm'])
     parser.add_argument('--vicreg_sim_coeff', default=25.0, type=float)
     parser.add_argument('--vicreg_std_coeff', default=25.0, type=float)
     parser.add_argument('--sogclr_gamma', default=0.8, type=float)
@@ -675,7 +675,8 @@ if __name__ == '__main__':
     parser.add_argument('--extract_data', action='store_true')
 
     #clip_knn args
-    parser.add_argument('--knn_cluster_factor', default=10, type=int)
+    parser.add_argument('--max_clusters', default=10, type=int)
+    parser.add_argument('--centroid_buf_size', default=10, type=int)
 
     # zero-shot transfer
     # parser.add_argument('--zs_dataset', required=True, choices=['cifar10', 'cifar100', 'imagenet'])
