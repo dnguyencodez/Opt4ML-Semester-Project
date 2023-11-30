@@ -41,12 +41,12 @@ def gmm_centroids(image_feat, text_feat, max_k=20):
     image_cluster_idxs = pairwise_distances_argmin(image_feat_std, image_centroids)
     text_cluster_idxs = pairwise_distances_argmin(text_feat_std, text_centroids)
 
-    image_centroids = torch.from_numpy(image_centroids).to(image_feat.device)
-    text_centroids = torch.from_numpy(text_centroids).to(text_feat.device)
+    image_centroids = torch.from_numpy(image_centroids).to(image_feat.device,image_feat.dtype)
+    text_centroids = torch.from_numpy(text_centroids).to(text_feat.device,text_feat.dtype)
     image_cluster_idxs = torch.from_numpy(image_cluster_idxs).to(image_feat.device)
     text_cluster_idxs = torch.from_numpy(text_cluster_idxs).to(text_feat.device)
 
-    return image_centroids, image_cluster_idxs, text_centroids, text_cluster_idxs
+    return image_centroids, text_centroids,image_cluster_idxs, text_cluster_idxs
 
 
 if __name__ == '__main__':

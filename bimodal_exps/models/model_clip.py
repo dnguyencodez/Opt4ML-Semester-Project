@@ -77,10 +77,16 @@ class CLIP(nn.Module):
             else:
                 self.criterion = CLIP_Loss(world_size=world_size, personalized_tau=personalized_tau, image_tau=self.image_temp, text_tau=self.text_temp)
         elif (self.ita_type == 'clip_knn'):
-            self.criterion = CLIP_Cluster_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp,n_clusters_max = n_clusters_max,centroid_buf_size=centroid_buf_size)
+            if not personalized_tau:
+                self.criterion = CLIP_Cluster_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp,n_clusters_max = n_clusters_max,centroid_buf_size=centroid_buf_size)
+            else:
+                self.criterion = CLIP_Cluster_Loss(world_size=world_size, personalized_tau=personalized_tau, image_tau=self.image_temp, text_tau=self.text_temp,n_clusters_max = n_clusters_max,centroid_buf_size=centroid_buf_size)
         elif (self.ita_type == 'clip_gmm'):
-            self.criterion = CLIP_Cluster_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp,n_clusters_max = n_clusters_max,centroid_buf_size=centroid_buf_size,clustering_type='gmm')
-        
+            if not personalized_tau:
+                self.criterion = CLIP_Cluster_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp,n_clusters_max = n_clusters_max,centroid_buf_size=centroid_buf_size,clustering_type='gmm')
+            else:
+                self.criterion = CLIP_Cluster_Loss(world_size=world_size, personalized_tau=personalized_tau, image_tau=self.image_temp, text_tau=self.text_temp,n_clusters_max = n_clusters_max,centroid_buf_size=centroid_buf_size,clustering_type='gmm')
+
         elif self.ita_type == 'cyclip':
             self.criterion = CyCLIP_Loss(world_size=world_size, temperature=self.temp)
 
@@ -167,6 +173,7 @@ class CLIP(nn.Module):
                 loss_ita = self.criterion(image_feat, text_feat, image_ids, text_ids)
                 info_dict['avg_image_tau'] = self.criterion.image_tau[image_ids].mean()
                 info_dict['avg_text_tau'] = self.criterion.text_tau[text_ids].mean()
+                info_dict['current_clusters'] = self.criterion.cur_clusters
 
             else:
                 loss_ita = self.criterion(image_feat, text_feat)
@@ -176,7 +183,8 @@ class CLIP(nn.Module):
                     avg_tau = self.temp
                 info_dict['avg_image_tau'] = avg_tau
                 info_dict['avg_text_tau'] = avg_tau
-
+                info_dict['current_clusters'] = self.criterion.cur_clusters
+                
         elif self.ita_type == 'vicreg':
             loss_ita = self.criterion(image_embeds, text_embeds)
             info_dict['avg_image_tau'] = 0.0

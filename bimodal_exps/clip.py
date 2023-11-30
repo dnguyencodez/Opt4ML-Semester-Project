@@ -123,6 +123,18 @@ def train(model, data_loader, optimizer, tokenizer, epoch, max_epoch, warmup_ste
             metric_logger.update(b_T=0.0)
             metric_logger.update(v=0.0)
             metric_logger.update(lamda=info_dict['lamda'])
+        elif args.ita_type in ['clip_knn', 'clip_gmm']:
+            metric_logger.update(avg_image_tau=info_dict['avg_image_tau'])
+            metric_logger.update(avg_text_tau=info_dict['avg_text_tau'])
+            metric_logger.update(cur_eta=0.0)
+            metric_logger.update(grad_tau_image=0.0)
+            metric_logger.update(grad_tau_text=0.0)
+            metric_logger.update(weights_image_pos=0.0)
+            metric_logger.update(weights_text_pos=0.0)
+            metric_logger.update(b_I=0.0)
+            metric_logger.update(b_T=0.0)
+            metric_logger.update(v=0.0)
+            metric_logger.update(lamda=0.0)
         else:
             metric_logger.update(avg_image_tau=info_dict['avg_image_tau'])
             metric_logger.update(avg_text_tau=info_dict['avg_text_tau'])
@@ -675,8 +687,8 @@ if __name__ == '__main__':
     parser.add_argument('--extract_data', action='store_true')
 
     #clip_knn args
-    parser.add_argument('--max_clusters', default=10, type=int)
-    parser.add_argument('--centroid_buf_size', default=10, type=int)
+    parser.add_argument('--n_clusters_max', default=10, type=int)
+    parser.add_argument('--centroid_buf_size', default=128, type=int)
 
     # zero-shot transfer
     # parser.add_argument('--zs_dataset', required=True, choices=['cifar10', 'cifar100', 'imagenet'])

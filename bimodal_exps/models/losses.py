@@ -63,7 +63,7 @@ class CLIP_Loss(nn.Module):
 class CLIP_Cluster_Loss(nn.Module):
 
     def __init__(self,n_clusters_max, world_size=8, temperature=0.01, personalized_tau=False, image_tau=None, text_tau=None,clustering_type='kmeans',centroid_buf_size=128):
-        super(CLIP_KNN_Loss, self).__init__()
+        super(CLIP_Cluster_Loss, self).__init__()
         self.world_size = world_size
         self.temperature = temperature
         self.personalized_tau = personalized_tau # if true, then temperatures are learnable
@@ -76,12 +76,15 @@ class CLIP_Cluster_Loss(nn.Module):
         self.n_max = n_clusters_max
         self.clustering_type = clustering_type
         self.centroid_buf_size = centroid_buf_size
+        self.cur_clusters = 0
 
     def add_centroids(self, image_centroids_new, text_centroids_new):
+        self.cur_clusters = image_centroids_new.shape[0]
         if self.image_centroids is None:
             self.image_centroids = image_centroids_new
             self.text_centroids = text_centroids_new
         else:
+            # print("image_centroids shape:", self.image_centroids.shape,"text_centroids shape:", self.text_centroids.shape)
             self.image_centroids = torch.cat([self.image_centroids,image_centroids_new],dim=0)
             self.text_centroids = torch.cat([self.text_centroids,text_centroids_new],dim=0)
 
@@ -91,7 +94,7 @@ class CLIP_Cluster_Loss(nn.Module):
 
 
 
-    def forward(self, image_centroids_new, text_features, image_idx=None, text_idx=None):
+    def forward(self, image_features, text_features, image_idx=None, text_idx=None):
         if self.world_size > 1:
             image_features = torch.cat(GatherLayer.apply(image_features), dim=0)
             text_features = torch.cat(GatherLayer.apply(text_features), dim=0)
@@ -115,7 +118,7 @@ class CLIP_Cluster_Loss(nn.Module):
 
             self.add_centroids(image_centroids_new, text_centroids_new)
             
-        # print("image_centroids shape:", self.image_centroids.shape,"text_centroids shape:", self.text_centroids.shape)
+        # print("image_centroids shape:", image_centroids_new.shape,"text_centroids shape:", text_centroids_new.shape)
         # print("image_features shape:", image_features.shape,"text_features shape:", text_features.shape)
         sim_image = torch.einsum('i d, j d -> i j', image_features, self.text_centroids) 
         sim_text = torch.einsum('i d, j d -> i j', text_features, self.image_centroids) 
@@ -130,8 +133,12 @@ class CLIP_Cluster_Loss(nn.Module):
         class_probs[:,-1] = 1.0
         # print("class_probs shape:", class_probs.shape)
         if self.personalized_tau:
-            image_temp = self.image_tau[image_idx]
-            text_temp = self.text_tau[text_idx]
+            image_temp = self.image_tau[image_idx].reshape((-1,1))
+            text_temp = self.text_tau[text_idx].reshape((-1,1))
+            # print("sim_image shape:", sim_image.shape,"sim_text shape:", sim_text.shape)
+            # print("image_tau shape:", self.image_tau.shape,"text_tau shape:", self.text_tau.shape)
+            # print("image_temp shape:", image_temp.shape,"text_temp shape:", text_temp.shape)
+            # print("image_temp:", image_temp,"text_temp:", text_temp)    
             total_loss = (F.cross_entropy(sim_text / text_temp, class_probs) + F.cross_entropy(sim_image / image_temp, class_probs)) / 2
 
         else:
