@@ -378,7 +378,6 @@ class iSogCLR_New_Loss(nn.Module):
 
 
 
-# add some new features to iSogCLR
 class iSogCLR_Cluster_Loss(nn.Module):
     def __init__(self, n_clusters_max, N=2900000, gamma=0.8, tau_init=0.01, world_size=8, bsz=128, rho_I=8.0, rho_T=8.0,
                        use_temp_net=True, feature_dim=256, clustering_type='kmeans',centroid_buf_size=128):  # use temperature network      
