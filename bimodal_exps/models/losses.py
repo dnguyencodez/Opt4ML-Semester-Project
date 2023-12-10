@@ -397,7 +397,7 @@ class SogCLR_Kmeans_Loss(nn.Module):
         image_loss = torch.sum(weights_image * image_diffs, dim=1, keepdim=True) / (batch_size-1)
         text_loss = torch.sum(weights_text * text_diffs, dim=0, keepdim=True) / (batch_size-1)
 
-        total_loss = image_loss.mean() + text_loss.mean() + intra_cluster_loss - (0.00025*inter_cluster_loss)
+        total_loss = image_loss.mean() + text_loss.mean() + (0.5*intra_cluster_loss) - (0.025*inter_cluster_loss)
 
         return total_loss, 0.0, 0.0
 
