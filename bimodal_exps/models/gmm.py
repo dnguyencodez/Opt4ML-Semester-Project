@@ -28,12 +28,15 @@ def get_gmm_with_optimal_k(data, max_k):
 
     return final_gmm
 
-def gmm_centroids(image_feat, text_feat, max_k=20):
+def gmm_centroids(image_feat, text_feat, k=None, optimal_k=False):
     image_feat_std = StandardScaler().fit_transform(image_feat.cpu().numpy())
     text_feat_std = StandardScaler().fit_transform(text_feat.cpu().numpy())
-
-    gmm_image = get_gmm_with_optimal_k(image_feat_std, max_k)
-    gmm_text = get_gmm_with_optimal_k(text_feat_std, max_k)
+    if optimal_k:
+        gmm_image = get_gmm_with_optimal_k(image_feat_std, k)
+        gmm_text = get_gmm_with_optimal_k(text_feat_std, k)
+    else:
+        gmm_image = GaussianMixture(n_components= k, tol=1e-4, init_params='kmeans').fit(image_feat_std)
+        gmm_text = GaussianMixture(n_components= k, tol=1e-4, init_params='kmeans').fit(text_feat_std)
 
     image_centroids = gmm_image.means_
     text_centroids = gmm_text.means_

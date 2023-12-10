@@ -30,7 +30,7 @@ def get_kmeans_with_optimal_k(data, max_k):
 
     return final_kmeans
 
-def kmeans_centroids(image_feat, text_feat, max_k=20):
+def kmeans_centroids(image_feat, text_feat, k= None, optimal_k=False):
     # image_feat_2d = PCA(n_components=2).fit_transform(image_feat.cpu().numpy())
     # text_feat_2d = PCA(n_components=2).fit_transform(text_feat.cpu().numpy())
     # image_feat_std = StandardScaler().fit_transform(image_feat_2d)
@@ -43,8 +43,13 @@ def kmeans_centroids(image_feat, text_feat, max_k=20):
 
     # kmean_image = KMeans(n_clusters=k).fit(image_feat_std)
     # kmean_text = KMeans(n_clusters=k).fit(text_feat_std)
-    kmean_image = get_kmeans_with_optimal_k(image_feat_std, max_k)
-    kmean_text = get_kmeans_with_optimal_k(text_feat_std, max_k)
+    if optimal_k :
+        kmean_image = get_kmeans_with_optimal_k(image_feat_std, k)
+        kmean_text = get_kmeans_with_optimal_k(text_feat_std, k)
+    else:
+        kmean_image = KMeans(n_clusters=k).fit(image_feat_std)
+        kmean_text = KMeans(n_clusters=k).fit(text_feat_std)
+        
 
     image_centroids = kmean_image.cluster_centers_
     text_centroids = kmean_text.cluster_centers_

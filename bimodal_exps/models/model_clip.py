@@ -3,8 +3,8 @@ from functools import partial
 import timm
 from transformers import AutoModel, RobertaModel
 
-from models.losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, VICReg_Loss, CLIP_Cluster_Loss
-from models.losses import iSogCLR_New_v2_Loss, iSogCLR_New_v1_Loss, onlineCLR_Loss, iSogCLR_New_Loss, SogCLR_Kmeans_Loss
+from models.losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, VICReg_Loss, CLIP_Cluster_Loss, SogCLR_Cluster_Loss
+from models.losses import iSogCLR_New_v2_Loss, iSogCLR_New_v1_Loss, onlineCLR_Loss, iSogCLR_New_Loss
 
 import torch
 from torch import nn
@@ -35,8 +35,9 @@ class CLIP(nn.Module):
                  vicreg_std_coeff = 25.0,
                  use_temp_net = True,
                  alpha = 1.0,
-                 n_clusters_max=50,
-                 centroid_buf_size=128,
+                 n_cluster_factor=10,
+                 optimal_cluster=False,
+                 centroid_buf_size=None,
                  distributed=True,
                  ):
         super().__init__()
@@ -78,9 +79,10 @@ class CLIP(nn.Module):
                 self.criterion = CLIP_Loss(world_size=world_size, personalized_tau=personalized_tau, image_tau=self.image_temp, text_tau=self.text_temp)
         elif (self.ita_type == 'clip_knn'):
             if not personalized_tau:
-                self.criterion = CLIP_Cluster_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp,n_clusters_max = n_clusters_max,centroid_buf_size=centroid_buf_size)
+                self.criterion = CLIP_Cluster_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp,n_clusters = bsz//n_cluster_factor,optimal_cluster=optimal_cluster, centroid_buf_size=centroid_buf_size)
             else:
                 self.criterion = CLIP_Cluster_Loss(world_size=world_size, personalized_tau=personalized_tau, image_tau=self.image_temp, text_tau=self.text_temp,n_clusters_max = n_clusters_max,centroid_buf_size=centroid_buf_size)
+        
         elif (self.ita_type == 'clip_gmm'):
             if not personalized_tau:
                 self.criterion = CLIP_Cluster_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp,n_clusters_max = n_clusters_max,centroid_buf_size=centroid_buf_size,clustering_type='gmm')
@@ -97,6 +99,12 @@ class CLIP(nn.Module):
             # self.criterion = SogCLR_Loss(world_size=world_size, gamma=sogclr_gamma, temperature=self.temp, bsz=bsz, enable_surrogate=enable_surrogate, 
             #                              surrogate_c=surrogate_c, lamda_rho=lamda_rho, lamda_init=lamda_init)
             self.criterion = SogCLR_Loss(world_size=world_size, gamma=sogclr_gamma, temperature=self.temp, bsz=bsz)
+        
+        elif self.ita_type == 'sogclr_knn':
+            self.criterion = SogCLR_Cluster_Loss(world_size=world_size, gamma=sogclr_gamma, temperature=self.temp, bsz=bsz,n_clusters = bsz//n_cluster_factor,optimal_cluster=optimal_cluster, centroid_buf_size=centroid_buf_size)
+
+        elif self.ita_type == 'sogclr_gmm':
+            self.criterion = SogCLR_Cluster_Loss(world_size=world_size, gamma=sogclr_gamma, temperature=self.temp, bsz=bsz,n_clusters = bsz//n_cluster_factor,optimal_cluster=optimal_cluster, centroid_buf_size=centroid_buf_size,clustering_type='gmm')
 
         # elif self.ita_type == 'sogclr_dro':
         #     self.criterion = SogCLR_DRO_Loss(world_size=world_size, gamma=sogclr_gamma, rho_init=rho_init, tau_init=tau_init, bsz=bsz,
@@ -193,6 +201,21 @@ class CLIP(nn.Module):
             info_dict['avg_text_tau'] = 0.0
 
         elif self.ita_type == 'sogclr':
+            if self.distributed:
+                image_ids = concat_all_gather(idx)
+                text_ids = concat_all_gather(text_idx)
+            else:
+                image_ids, text_ids = idx, text_idx
+            loss_ita, avg_image_tau, avg_text_tau = self.criterion(image_feat, text_feat, image_ids, text_ids, epoch)
+            if not self.learnable_temp:
+                avg_tau = torch.tensor(self.temp)
+            else:
+                avg_tau = self.temp
+            info_dict['avg_text_tau'] = avg_text_tau
+            info_dict['avg_image_tau'] = avg_image_tau
+            info_dict['lamda'] = 0.0
+
+        elif self.ita_type in ['sogclr_knn','sogclr_gmm']:
             if self.distributed:
                 image_ids = concat_all_gather(idx)
                 text_ids = concat_all_gather(text_idx)
