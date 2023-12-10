@@ -199,6 +199,12 @@ class SogCLR_Cluster_Loss(nn.Module):
         self.b_T = torch.zeros(N).cuda()
         self.s_I = torch.zeros(N).cuda()
         self.s_T = torch.zeros(N).cuda()
+
+        self.b_I_centroid = torch.zeros(self.n).cuda()
+        self.b_T_centroid = torch.zeros(self.n).cuda()
+        self.s_I_centroid = torch.zeros(self.n).cuda()
+        self.s_T_centroid = torch.zeros(self.n).cuda()
+
         self.gamma = gamma
         self.temperature = temperature
         self.eps = 1e-8
@@ -251,15 +257,16 @@ class SogCLR_Cluster_Loss(nn.Module):
 
             self.add_centroids(image_centroids_new, text_centroids_new)
         
-        # text_full = torch.cat([text_features, self.text_centroids], dim=0)
-        # image_full = torch.cat([image_features, self.image_centroids], dim=0)
+        text_full = torch.cat([text_features, self.text_centroids], dim=0)
+        image_full = torch.cat([image_features, self.image_centroids], dim=0)
         # print("image_centroids shape:", image_centroids_new.shape,"text_centroids shape:", text_centroids_new.shape)
         # print("image_features shape:", image_features.shape,"text_features shape:", text_features.shape)
-        sim_image = torch.einsum('i d, j d -> i j', image_features, self.text_centroids) 
-        sim_text = torch.einsum('i d, j d -> i j', text_features, self.image_centroids) 
-        self_sim = torch.sum(image_features * text_features, dim=1, keepdim=True) 
+        
+        sim = torch.sum(image_full * text_full, dim=1, keepdim=True) 
+        diag_sim = torch.diagonal(sim)
 
-        batch_size = sim_image.shape[0]
+        n_centroids = self.image_centroids.shape[0]
+        batch_size = sim.shape[0]
         #concatenate all similarities
         # print("sim_image shape:", sim_image.shape,"sim_text shape:", sim_text.shape,"self_sim shape:", self_sim.shape)
         # sim_image = torch.cat([sim_image, self_sim], dim=1)
@@ -269,8 +276,8 @@ class SogCLR_Cluster_Loss(nn.Module):
         # class_probs[:,-1] = 1.0
         # print("class_probs shape:", class_probs.shape)
         # print("sim_image shape:", sim_image.shape,"sim_text shape:", sim_text.shape,"self_sim shape:", self_sim.shape)
-        image_diffs = sim_image - self_sim
-        text_diffs = sim_text - self_sim
+        image_diffs = sim - diag_sim[:, None]
+        text_diffs = sim - diag_sim[None, :]
 
         if self.enable_surrogate:
             image_diffs = self._sqh(image_diffs)
@@ -283,25 +290,33 @@ class SogCLR_Cluster_Loss(nn.Module):
         # print("image_diffs shape:", image_diffs.shape,"text_diffs shape:", text_diffs.shape)
         
         # update b
-        old_b_I = self.b_I[image_ids]
+        # old_b_T = self.b_I[text_ids]
+        old_b_I = torch.cat([self.b_I[image_ids],self.b_I_centroid[:n_centroids]],dim=0)
 
         # print(old_b_I.shape)
         # print(old_b_I[:, None].tile(1, image_diffs.shape[1]).shape)
-        new_b_I = torch.max(image_diffs_d_temps, old_b_I[:, None].tile(1, image_diffs.shape[1]))
-        self.b_I[image_ids] = torch.max(new_b_I, dim=1)[0]
+        new_b_I = torch.max(image_diffs_d_temps, old_b_I[:, None].tile(1, batch_size))
+        b_I_update = torch.max(new_b_I, dim=1)[0]
+        self.b_I[image_ids] = b_I_update[:len(image_ids)]
+        self.b_I_centroid[:n_centroids] = b_I_update[len(image_ids):]
+
         # print(new_b_I.shape)
-        old_b_T = self.b_T[text_ids]
-        # print(old_b_T.shape)
-        # print(old_b_T[:, None].tile(1, text_diffs.shape[1]).shape)
-        new_b_T = torch.max(text_diffs_d_temps, old_b_T[:,None].tile(1,text_diffs.shape[1]))
-        self.b_T[text_ids] = torch.max(new_b_T, dim=1)[0]
+        # old_b_T = self.b_T[text_ids]
+        old_b_T = torch.cat([self.b_T[text_ids],self.b_T_centroid[:n_centroids]],dim=0)
+    
+        new_b_T = torch.max(text_diffs_d_temps, old_b_T[None,:].tile(batch_size,1))
+        b_T_update = torch.max(new_b_T, dim=0)[0]
+        # print(b_I_update.shape,self.b_I_centroid.shape)
+        # print(b_T_update.shape, len(text_ids), n_centroids,self.b_T_centroid.shape)
+        self.b_T[text_ids] = b_T_update[:len(text_ids)]
+        self.b_T_centroid[:n_centroids] = b_T_update[len(text_ids):]
         
         # print("b_I shape:", self.b_I[image_ids][:, None].shape,"b_T shape:", self.b_T[image_ids][:, None].shape)
         # self.mask_neg = torch.ones_like(image_diffs_d_temps).to(image_features.device)
         # self.mask_neg[:,-1] = 0
 
-        exp_image_diffs = torch.exp(image_diffs_d_temps - self.b_I[image_ids][:, None]) #* self.mask_neg # -b to avoid exp operation overflow
-        exp_text_diffs = torch.exp(text_diffs_d_temps - self.b_T[text_ids][:, None]) #* self.mask_neg
+        exp_image_diffs = torch.exp(image_diffs_d_temps - b_I_update[:, None]) #* self.mask_neg # -b to avoid exp operation overflow
+        exp_text_diffs = torch.exp(text_diffs_d_temps - b_T_update[None,:]) #* self.mask_neg
 
         g_I = torch.sum(exp_image_diffs, dim=1, keepdim=True) / (batch_size-1)
         g_T = torch.sum(exp_text_diffs, dim=1, keepdim=True) / (batch_size-1)
@@ -311,13 +326,15 @@ class SogCLR_Cluster_Loss(nn.Module):
             s_I = g_I
             s_T = g_T
         else:
-            s_I = (1.0-self.gamma) * self.s_I[image_ids] * torch.exp(old_b_I - self.b_I[image_ids]) + self.gamma * g_I.squeeze()
-            s_T = (1.0-self.gamma) * self.s_T[text_ids] * torch.exp(old_b_T - self.b_T[text_ids]) + self.gamma * g_T.squeeze()
+            s_I = (1.0-self.gamma) * torch.cat([self.s_I[image_ids],self.s_I_centroid[:n_centroids]],dim=0) * torch.exp(old_b_I - b_I_update) + self.gamma * g_I.squeeze()
+            s_T = (1.0-self.gamma) * torch.cat([self.s_T[image_ids],self.s_T_centroid[:n_centroids]],dim=0) * torch.exp(old_b_T - b_T_update) + self.gamma * g_T.squeeze()
             s_I = s_I.reshape(g_I.shape)
             s_T = s_T.reshape(g_T.shape)
 
-        self.s_I[image_ids] = s_I.squeeze()
-        self.s_T[text_ids] = s_T.squeeze()
+        self.s_I[image_ids] = s_I[:len(image_ids)].squeeze()
+        self.s_T[text_ids] = s_T[:len(image_ids)].squeeze()
+        self.s_I_centroid[:n_centroids] = s_I[len(image_ids):].squeeze()
+        self.s_T_centroid[:n_centroids] = s_T[len(image_ids):].squeeze()
         
         weights_image = exp_image_diffs / (s_I + self.eps)
         weights_text = exp_text_diffs / (s_T + self.eps)
@@ -327,8 +344,8 @@ class SogCLR_Cluster_Loss(nn.Module):
         if torch.any(torch.isnan(weights_text)):
             assert 0, "weights_text has nan."
 
-        image_loss = torch.sum(weights_image * image_diffs, dim=1, keepdim=True) / (image_diffs.shape[1]-1)
-        text_loss = torch.sum(weights_text * text_diffs, dim=1, keepdim=True) / (text_diffs.shape[1]-1)
+        image_loss = torch.sum(weights_image * image_diffs, dim=1, keepdim=True) / (batch_size-1)
+        text_loss = torch.sum(weights_text * text_diffs, dim=1, keepdim=True) / (batch_size-1)
 
         total_loss = image_loss.mean() + text_loss.mean()
 
