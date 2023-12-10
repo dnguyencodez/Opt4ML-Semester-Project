@@ -245,6 +245,162 @@ class SogCLR_Loss(nn.Module):
 
         return total_loss, 0.0, 0.0
 
+class SogCLR_Kmeans_Loss(nn.Module):
+    def __init__(self, n_clusters_max, N=2900000, gamma=0.1, temperature=0.07, world_size=8, bsz=128, enable_surrogate=False, surrogate_c=1.0,
+                lamda_rho=1.0, lamda_init=1.0, clustering_type='kmeans',centroid_buf_size=128):
+        
+        #Inputs:
+        #   N is number of samples in training set
+        
+        super(SogCLR_Kmeans_Loss, self).__init__()
+        self.world_size = world_size
+        self.s_I = torch.zeros(N).cuda()
+        self.s_T = torch.zeros(N).cuda()
+        self.b_I = torch.zeros(N).cuda()
+        self.b_T = torch.zeros(N).cuda()
+        self.gamma = gamma
+        self.temperature = temperature
+        self.eps = 1e-8
+        self.bsz = bsz
+        self.mask_neg = (1.0 - torch.eye(bsz)).cuda()
+        self.enable_surrogate = enable_surrogate
+        self.c = surrogate_c # margin parameter for the square hinge loss
+
+        self.image_centroids = None
+        self.text_centroids = None
+
+        self.n_max = n_clusters_max
+        self.clustering_type = clustering_type
+        self.centroid_buf_size = centroid_buf_size
+        self.cur_clusters = 0
+
+    def _sqh(self, x):
+        return torch.max(torch.zeros_like(x), x + self.c) ** 2
+    
+    def add_centroids(self, image_centroids_new, text_centroids_new):
+        self.cur_clusters = image_centroids_new.shape[0]
+        if self.image_centroids is None:
+            self.image_centroids = image_centroids_new
+            self.text_centroids = text_centroids_new
+        else:
+            # print("image_centroids shape:", self.image_centroids.shape,"text_centroids shape:", self.text_centroids.shape)
+            self.image_centroids = torch.cat([self.image_centroids,image_centroids_new],dim=0)
+            self.text_centroids = torch.cat([self.text_centroids,text_centroids_new],dim=0)
+
+        if self.image_centroids.shape[0] > self.centroid_buf_size:
+            self.image_centroids = self.image_centroids[1:]
+            self.text_centroids = self.text_centroids[1:]
+    
+    def _calculate_cluster_distances(self, features, centroids):
+        # Calculate distances to all centroids
+        distances = torch.cdist(features, centroids, p=2)  # Euclidean distance
+
+        # Intra-cluster distance: distance to the closest centroid
+        intra_cluster_dist = torch.min(distances, dim=1).values
+
+        # Inter-cluster distance: sum of distances to all other centroids
+        inter_cluster_dist = torch.sum(distances, dim=1) - intra_cluster_dist
+
+        return intra_cluster_dist, inter_cluster_dist
+
+    def forward(self, image_features, text_features, image_ids, text_ids, epoch):
+        
+        #Inputs:
+        #    image_features, text_features is l2-normalized tensor
+        #    image_features, text_features: [batch_size, emb_dim]
+        
+        if self.world_size > 1:
+            image_features = torch.cat(GatherLayer.apply(image_features), dim=0)
+            text_features = torch.cat(GatherLayer.apply(text_features), dim=0)
+
+        with torch.no_grad():
+            # Add centroids to feature list
+            if self.image_centroids is None:
+                image_feat_new = image_features
+                text_feat_new = text_features
+            else:
+                image_feat_new = torch.cat([image_features, self.image_centroids], dim=0)
+                text_feat_new = torch.cat([text_features, self.text_centroids], dim=0)
+            
+            if self.clustering_type == 'kmeans':
+                image_centroids_new, text_centroids_new, _, _ = kmeans_centroids(image_feat_new, text_feat_new,self.n_max)
+            
+            elif self.clustering_type == 'gmm':
+                image_centroids_new, text_centroids_new,_,_ = gmm_centroids(image_feat_new, text_feat_new,self.n_max)
+
+            self.add_centroids(image_centroids_new, text_centroids_new)
+
+        # compute the logits (similarity between each image-text pair)
+        sim = torch.einsum('i d, j d -> i j', image_features, text_features)
+        diag_sim = torch.diagonal(sim)
+
+        batch_size = sim.shape[0]
+
+        # E_I(x_i)*E_T(t) - E_I(x_i)*E_T(t_i)
+        image_diffs = sim - diag_sim[:, None]
+        # E_I(x)*E_T(t_i) - E_I(x_i)*E_T(t_i)
+        text_diffs = sim - diag_sim[None, :]
+
+        if self.enable_surrogate:
+            image_diffs = self._sqh(image_diffs)
+            text_diffs = self._sqh(text_diffs)
+
+        image_diffs_d_temps = (image_diffs / self.temperature).clone().detach_()
+        text_diffs_d_temps = (text_diffs / self.temperature).clone().detach_()
+        
+        # update b
+        old_b_I = self.b_I[image_ids]
+        new_b_I = torch.max(image_diffs_d_temps, old_b_I[:, None].tile(1, batch_size))
+        self.b_I[image_ids] = torch.max(new_b_I, dim=1)[0]
+
+        old_b_T = self.b_T[text_ids]
+        new_b_T = torch.max(text_diffs_d_temps, old_b_T[None, :].tile(batch_size, 1))
+        self.b_T[text_ids] = torch.max(new_b_T, dim=0)[0]
+        
+        exp_image_diffs = torch.exp(image_diffs_d_temps - self.b_I[image_ids][:, None]) * self.mask_neg # -b to avoid exp operation overflow
+        exp_text_diffs = torch.exp(text_diffs_d_temps - self.b_T[text_ids][None, :]) * self.mask_neg
+
+        g_I = torch.sum(exp_image_diffs, dim=1, keepdim=True) / (batch_size-1)
+        g_T = torch.sum(exp_text_diffs, dim=0, keepdim=True) / (batch_size-1)
+
+        # print("g_I:", g_I.mean())
+        # print("g_T:", g_T.mean())
+
+        if epoch == 0:
+            s_I = g_I
+            s_T = g_T
+        else:
+            s_I = (1.0-self.gamma) * self.s_I[image_ids] * torch.exp(old_b_I - self.b_I[image_ids]) + self.gamma * g_I.squeeze()
+            s_T = (1.0-self.gamma) * self.s_T[text_ids] * torch.exp(old_b_T - self.b_T[text_ids]) + self.gamma * g_T.squeeze()
+            s_I = s_I.reshape(g_I.shape)
+            s_T = s_T.reshape(g_T.shape)
+
+        self.s_I[image_ids] = s_I.squeeze()
+        self.s_T[text_ids] = s_T.squeeze()
+        
+        weights_image = exp_image_diffs / (s_I + self.eps)
+        weights_text = exp_text_diffs / (s_T + self.eps)
+
+        if torch.any(torch.isnan(weights_image)):
+            assert 0, "weights_image has nan."
+        if torch.any(torch.isnan(weights_text)):
+            assert 0, "weights_text has nan."
+
+        # Calculate Intra-Cluster and Inter-Cluster Distances
+        intra_image, inter_image = self._calculate_cluster_distances(image_features, self.text_centroids)
+        intra_text, inter_text = self._calculate_cluster_distances(text_features, self.image_centroids)
+
+        # Calculate the new loss components
+        intra_cluster_loss = torch.mean(intra_image + intra_text)
+        inter_cluster_loss = torch.mean(inter_image + inter_text)
+
+        image_loss = torch.sum(weights_image * image_diffs, dim=1, keepdim=True) / (batch_size-1)
+        text_loss = torch.sum(weights_text * text_diffs, dim=0, keepdim=True) / (batch_size-1)
+
+        total_loss = image_loss.mean() + text_loss.mean() + intra_cluster_loss - (0.00025*inter_cluster_loss)
+
+        return total_loss, 0.0, 0.0
+
 
 
 # add some new features to iSogCLR
@@ -571,160 +727,6 @@ class iSogCLR_New_v1_Loss(nn.Module):
 
         image_loss = torch.sum(weights_image * sim, dim=1, keepdim=True) / self.neg_num
         text_loss = torch.sum(weights_text * sim, dim=0, keepdim=True) / self.neg_num
-
-        # total loss
-        total_loss = image_loss.mean() + text_loss.mean() + pos_term_loss.mean()
-
-        ####
-        # compute the loss for temperature generators
-        ####
-        temp_weight_image = torch.log(s_I) + self.b_I[image_ids][:, None] + self.rho_I - torch.sum(weights_image * image_temp_term, dim=1, keepdim=True) / self.neg_num
-        temp_weight_text = torch.log(s_T) + self.b_T[text_ids][None, :] + self.rho_T - torch.sum(weights_text * text_temp_term, dim=0, keepdim=True) / self.neg_num
-
-        temp_image_loss = torch.mean(temp_weight_image * tau_image[:, None])
-        temp_text_loss = torch.mean(temp_weight_text * tau_text[None, :])
-
-        total_loss += temp_image_loss + temp_text_loss
-
-        return total_loss, tau_image.mean().item(), tau_text.mean().item()
-    
-
-class kmeans_iSogCLR_New_v1_Loss(nn.Module):
-    def __init__(self, n_clusters_max, N=2900000, gamma=0.8, tau_min=0.005, tau_max=1.0, rho_init=6.0, 
-                 bsz=128, world_size=8, eps=1e-6, M=64, feature_dim=256, clustering_type='kmeans',centroid_buf_size=128):
-        
-        #Inputs:
-        #   N is the number of samples in training set
-        #   M is the number prototypes in the temperature generator
-        
-        super(iSogCLR_New_v1_Loss, self).__init__()
-        self.world_size = world_size
-        self.gamma = gamma
-
-        self.s_I = torch.zeros(N).cuda()
-        self.s_T = torch.zeros(N).cuda()
-        self.b_I = torch.zeros(N).cuda()
-        self.b_T = torch.zeros(N).cuda()
-        self.rho_I = rho_init
-        self.rho_T = rho_init
-        self.eps = eps
-        self.batch_size = bsz
-        self.grad_clip = 5.0
-        
-        self.image_temp_gen = TempGenerator(feature_dim=feature_dim, M=M, tau_min=tau_min, tau_max=tau_max).cuda()
-        self.text_temp_gen = TempGenerator(feature_dim=feature_dim, M=M, tau_min=tau_min, tau_max=tau_max).cuda()
-
-        self.neg_num = bsz - 1
-        self.mask_neg = (1.0 - torch.eye(bsz)).cuda()
-
-        self.image_centroids = None
-        self.text_centroids = None
-
-        self.n_max = n_clusters_max
-        self.clustering_type = clustering_type
-        self.centroid_buf_size = centroid_buf_size
-        self.cur_clusters = 0
-
-    def add_centroids(self, image_centroids_new, text_centroids_new):
-        self.cur_clusters = image_centroids_new.shape[0]
-        if self.image_centroids is None:
-            self.image_centroids = image_centroids_new
-            self.text_centroids = text_centroids_new
-        else:
-            # print("image_centroids shape:", self.image_centroids.shape,"text_centroids shape:", self.text_centroids.shape)
-            self.image_centroids = torch.cat([self.image_centroids,image_centroids_new],dim=0)
-            self.text_centroids = torch.cat([self.text_centroids,text_centroids_new],dim=0)
-
-        if self.image_centroids.shape[0] > self.centroid_buf_size:
-            self.image_centroids = self.image_centroids[1:]
-            self.text_centroids = self.text_centroids[1:]
-
-
-    def forward(self, image_features, text_features, image_ids, text_ids, epoch):
-        if self.world_size > 1:
-            image_features = torch.cat(GatherLayer.apply(image_features), dim=0)
-            text_features = torch.cat(GatherLayer.apply(text_features), dim=0)
-
-        
-        with torch.no_grad():
-            # Add centroids to feature list
-            if self.image_centroids is None:
-                image_feat_new = image_features
-                text_feat_new = text_features
-            else:
-                image_feat_new = torch.cat([image_features, self.image_centroids], dim=0)
-                text_feat_new = torch.cat([text_features, self.text_centroids], dim=0)
-            
-            if self.clustering_type == 'kmeans':
-                image_centroids_new, text_centroids_new, _, _ = kmeans_centroids(image_feat_new, text_feat_new,self.n_max)
-            
-            elif self.clustering_type == 'gmm':
-                image_centroids_new, text_centroids_new,_,_ = gmm_centroids(image_feat_new, text_feat_new,self.n_max)
-
-            self.add_centroids(image_centroids_new, text_centroids_new)
-
-        # generate temperatures first
-        tau_image = self.image_temp_gen(image_features.detach())
-        tau_text = self.text_temp_gen(text_features.detach())
-
-        # compute the logits (similarity between each image-text pair)
-        sim = torch.einsum('i d, j d -> i j', image_features, text_features)
-        # sim_centroids = torch.einsum('i d, j d -> i j', self.image_centroids, self.text_centroids)
-        # Compute similarity with centroids
-        sim_centroids_image = torch.einsum('i d, j d -> i j', image_features, self.text_centroids) 
-        sim_centroids_text = torch.einsum('i d, j d -> i j', text_features, self.image_centroids) 
-
-        # Combine similarities
-        combined_sim = torch.cat([sim, sim_centroids_image, sim_centroids_text], dim=1)
-        diag_sim = torch.diagonal(combined_sim)
-
-        batch_size = combined_sim.shape[0]
-
-        ####
-        # consider the loss function first
-        ####
-        # the loss for positve pairs
-        pos_term_loss = -2 * diag_sim
-
-        # the loss for negative pairs
-        image_temp_term = (combined_sim / tau_image[:, None]).detach()
-        text_temp_term = (combined_sim / tau_text[None, :]).detach()
-
-        # employ b to avoid exp operation overflow
-        old_b_I = self.b_I[image_ids]
-        new_b_I = torch.max(image_temp_term, old_b_I[:, None].tile(1, batch_size))
-        self.b_I[image_ids] = torch.max(new_b_I, dim=1)[0]
-
-        old_b_T = self.b_T[text_ids]
-        new_b_T = torch.max(text_temp_term, old_b_T[None, :].tile(batch_size, 1))
-        self.b_T[text_ids] = torch.max(new_b_T, dim=0)[0]
-
-        exp_image_temp_term = torch.exp(image_temp_term - self.b_I[image_ids][:, None]) * self.mask_neg
-        exp_text_temp_term = torch.exp(text_temp_term - self.b_T[text_ids][None, :]) * self.mask_neg
-
-        g_I = torch.sum(exp_image_temp_term, dim=1, keepdim=True) / self.neg_num
-        g_T = torch.sum(exp_text_temp_term, dim=0, keepdim=True) / self.neg_num
-
-        # print("g_I:", g_I.mean())
-        # print("g_T:", g_T.mean())
-
-        if epoch == 0:
-            s_I = g_I
-            s_T = g_T
-        else:
-            s_I = (1.0-self.gamma) * self.s_I[image_ids] * torch.exp(old_b_I - self.b_I[image_ids]) + self.gamma * g_I.squeeze()
-            s_T = (1.0-self.gamma) * self.s_T[text_ids] * torch.exp(old_b_T - self.b_T[text_ids]) + self.gamma * g_T.squeeze()
-            s_I = s_I.reshape(g_I.shape)
-            s_T = s_T.reshape(g_T.shape)
-
-        self.s_I[image_ids] = s_I.squeeze()
-        self.s_T[text_ids] = s_T.squeeze()
-
-        weights_image = exp_image_temp_term / s_I
-        weights_text = exp_text_temp_term / s_T
-
-        image_loss = torch.sum(weights_image * combined_sim, dim=1, keepdim=True) / self.neg_num
-        text_loss = torch.sum(weights_text * combined_sim, dim=0, keepdim=True) / self.neg_num
 
         # total loss
         total_loss = image_loss.mean() + text_loss.mean() + pos_term_loss.mean()

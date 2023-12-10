@@ -4,7 +4,7 @@ import timm
 from transformers import AutoModel, RobertaModel
 
 from models.losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, VICReg_Loss, CLIP_Cluster_Loss
-from models.losses import iSogCLR_New_v2_Loss, iSogCLR_New_v1_Loss, onlineCLR_Loss, iSogCLR_New_Loss, kmeans_iSogCLR_New_v1_Loss
+from models.losses import iSogCLR_New_v2_Loss, iSogCLR_New_v1_Loss, onlineCLR_Loss, iSogCLR_New_Loss, SogCLR_Kmeans_Loss
 
 import torch
 from torch import nn
@@ -106,8 +106,8 @@ class CLIP(nn.Module):
                                                  eta_init=eta_init, beta_u=beta_u)
         elif self.ita_type == 'isogclr_new_v1':
             self.criterion = iSogCLR_New_v1_Loss(world_size=world_size, gamma=sogclr_gamma, rho_init=rho_init, bsz=bsz)
-        elif self.ita_type == 'kmeans_isoglcr_new_v1':
-            self.criterion = kmeans_iSogCLR_New_v1_Loss(n_clusters_max=n_clusters_max, world_size=world_size, gamma=sogclr_gamma)
+        elif self.ita_type == 'sogclr_kmeans':
+            self.criterion = SogCLR_Kmeans_Loss(n_clusters_max=n_clusters_max, world_size=world_size, gamma=sogclr_gamma, bsz=bsz)
         elif self.ita_type == 'onlineclr':
             self.criterion = onlineCLR_Loss(world_size=world_size, temperature=self.temp, gamma=sogclr_gamma)
 
@@ -237,15 +237,20 @@ class CLIP(nn.Module):
             info_dict['avg_text_tau'] = avg_text_tau
             info_dict['avg_image_tau'] = avg_image_tau
 
-        elif self.ita_type == 'kmeans_isogclr_new_v1':
+        elif self.ita_type == 'sogclr_kmeans':
             if self.distributed:
                 image_ids = concat_all_gather(idx)
                 text_ids = concat_all_gather(text_idx)
             else:
                 image_ids, text_ids = idx, text_idx
             loss_ita, avg_image_tau, avg_text_tau = self.criterion(image_feat, text_feat, image_ids, text_ids, epoch)
+            if not self.learnable_temp:
+                avg_tau = torch.tensor(self.temp)
+            else:
+                avg_tau = self.temp
             info_dict['avg_text_tau'] = avg_text_tau
             info_dict['avg_image_tau'] = avg_image_tau
+            info_dict['lamda'] = 0.0
 
         elif self.ita_type == 'onlineclr':
             loss_ita = self.criterion(image_feat, text_feat)
