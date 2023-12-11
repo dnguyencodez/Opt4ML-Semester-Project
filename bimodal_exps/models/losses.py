@@ -178,8 +178,158 @@ class CLIP_Cluster_Loss(nn.Module):
 
         
         return total_loss
-
+    
 class SogCLR_Cluster_Loss(nn.Module):
+    def __init__(self, N=2900000,temperature=0.07,gamma=0.1, world_size=8, bsz=128, enable_surrogate=False, surrogate_c=1.0,lamda_rho=1.0, lamda_init=1.0,
+                n_clusters=10, optimal_cluster=False,clustering_type='kmeans',centroid_buf_size=None):
+        super(SogCLR_Cluster_Loss, self).__init__()
+        self.world_size = world_size
+        self.temperature = temperature
+        self.image_centroids = None
+        self.text_centroids = None
+        # self.image_cluster_index = None
+        # self.text_cluster_index = None
+        self.n = n_clusters
+        self.optimal_cluster = optimal_cluster
+        self.clustering_type = clustering_type
+        self.centroid_buf_size = centroid_buf_size
+        self.cur_clusters = 0
+
+        self.b_I = torch.zeros(N).cuda()
+        self.b_T = torch.zeros(N).cuda()
+        self.s_I = torch.zeros(N).cuda()
+        self.s_T = torch.zeros(N).cuda()
+
+        self.b_I_centroid = torch.zeros(self.n).cuda()
+        self.b_T_centroid = torch.zeros(self.n).cuda()
+        self.s_I_centroid = torch.zeros(self.n).cuda()
+        self.s_T_centroid = torch.zeros(self.n).cuda()
+
+        self.gamma = gamma
+        self.temperature = temperature
+        self.eps = 1e-8
+        self.bsz = bsz
+        self.mask_neg = (1.0 - torch.eye(bsz)).cuda()
+        self.enable_surrogate = enable_surrogate
+        self.c = surrogate_c
+        
+
+    def add_centroids(self, image_centroids_new, text_centroids_new):
+        self.cur_clusters = image_centroids_new.shape[0]
+        if self.centroid_buf_size is None:
+            self.image_centroids = image_centroids_new
+            self.text_centroids = text_centroids_new
+        else:
+            if self.image_centroids is None:
+                self.image_centroids = image_centroids_new
+                self.text_centroids = text_centroids_new
+            else:
+                # print("image_centroids shape:", self.image_centroids.shape,"text_centroids shape:", self.text_centroids.shape)
+                self.image_centroids = torch.cat([self.image_centroids,image_centroids_new],dim=0)
+                self.text_centroids = torch.cat([self.text_centroids,text_centroids_new],dim=0)
+
+            if self.image_centroids.shape[0] > self.centroid_buf_size:
+                self.image_centroids = self.image_centroids[1:]
+                self.text_centroids = self.text_centroids[1:]
+
+    def _sqh(self, x):
+        return torch.max(torch.zeros_like(x), x + self.c) ** 2
+
+    def forward(self, image_features, text_features, image_ids, text_ids,epoch):
+        if self.world_size > 1:
+            image_features = torch.cat(GatherLayer.apply(image_features), dim=0)
+            text_features = torch.cat(GatherLayer.apply(text_features), dim=0)
+
+        with torch.no_grad():
+            # Add centroids to feature list
+            if self.image_centroids is None:
+                image_feat_new = image_features
+                text_feat_new = text_features
+            else:
+                image_feat_new = torch.cat([image_features, self.image_centroids], dim=0)
+                text_feat_new = torch.cat([text_features, self.text_centroids], dim=0)
+            
+            if self.clustering_type == 'kmeans':
+                image_centroids_new, text_centroids_new, _, _ = kmeans_centroids(image_feat_new, text_feat_new,self.n,self.optimal_cluster)
+            
+            elif self.clustering_type == 'gmm':
+                image_centroids_new, text_centroids_new,_,_ = gmm_centroids(image_feat_new, text_feat_new,self.n,self.optimal_cluster)
+
+            self.add_centroids(image_centroids_new, text_centroids_new)
+
+        text_full = torch.cat([text_features, self.text_centroids], dim=0)
+        image_full = torch.cat([image_features, self.image_centroids], dim=0)
+        # print("image_centroids shape:", image_centroids_new.shape,"text_centroids shape:", text_centroids_new.shape)
+        # print("image_features shape:", image_features.shape,"text_features shape:", text_features.shape)
+        sim_image = torch.einsum('i d, j d -> i j', image_features, text_full) 
+        sim_text = torch.einsum('i d, j d -> i j', text_features, image_full) 
+        self_sim = torch.sum(image_features * text_features, dim=1, keepdim=True) 
+
+        n_shape = sim_image.shape[1]
+        batch_size = sim_image.shape[0]
+        image_diffs = sim_image - self_sim
+        text_diffs = sim_text - self_sim
+
+        if self.enable_surrogate:
+            image_diffs = self._sqh(image_diffs)
+            text_diffs = self._sqh(text_diffs)
+
+        image_diffs_d_temps = (image_diffs / self.temperature).clone().detach_()
+        text_diffs_d_temps = (text_diffs / self.temperature).clone().detach_()
+
+        # update b
+        old_b_I = self.b_I[text_ids]
+
+        # print(old_b_I.shape)
+        # print(old_b_I[:, None].tile(1, image_diffs.shape[1]).shape)
+        new_b_I = torch.max(image_diffs_d_temps, old_b_I[:, None].tile(1,n_shape))
+        self.b_I[image_ids] = torch.max(new_b_I, dim=1)[0]
+
+        # print(new_b_I.shape)
+        old_b_T = self.b_T[text_ids]
+        new_b_T = torch.max(text_diffs_d_temps, old_b_T[:,None].tile(1,n_shape))
+        self.b_T[text_ids] = torch.max(new_b_T, dim=1)[0]
+        
+        # print("b_I shape:", self.b_I[image_ids][:, None].shape,"b_T shape:", self.b_T[image_ids][:, None].shape)
+        # self.mask_neg = torch.ones_like(image_diffs_d_temps).to(image_features.device)
+        # self.mask_neg[:,-1] = 0
+
+        exp_image_diffs = torch.exp(image_diffs_d_temps - self.b_I[image_ids][:, None]) #* self.mask_neg # -b to avoid exp operation overflow
+        exp_text_diffs = torch.exp(text_diffs_d_temps - self.b_T[text_ids][:, None]) #* self.mask_neg
+
+        g_I = torch.sum(exp_image_diffs, dim=1, keepdim=True) / (n_shape-1)
+        g_T = torch.sum(exp_text_diffs, dim=1, keepdim=True) / (n_shape-1)
+
+
+        if epoch == 0:
+            s_I = g_I
+            s_T = g_T
+        else:
+            s_I = (1.0-self.gamma) * self.s_I[image_ids] * torch.exp(old_b_I - self.b_I[image_ids]) + self.gamma * g_I.squeeze()
+            s_T = (1.0-self.gamma) * self.s_T[text_ids] * torch.exp(old_b_T - self.b_T[text_ids]) + self.gamma * g_T.squeeze()
+            s_I = s_I.reshape(g_I.shape)
+            s_T = s_T.reshape(g_T.shape)
+
+        self.s_I[image_ids] = s_I.squeeze()
+        self.s_T[text_ids] = s_T.squeeze()
+        
+        weights_image = exp_image_diffs / (s_I + self.eps)
+        weights_text = exp_text_diffs / (s_T + self.eps)
+
+        if torch.any(torch.isnan(weights_image)):
+            assert 0, "weights_image has nan."
+        if torch.any(torch.isnan(weights_text)):
+            assert 0, "weights_text has nan."
+
+        image_loss = torch.sum(weights_image * image_diffs, dim=1, keepdim=True) / (n_shape-1)
+        text_loss = torch.sum(weights_text * text_diffs, dim=1, keepdim=True) / (n_shape-1)
+
+        total_loss = image_loss.mean() + text_loss.mean()
+
+        
+        return total_loss, 0.0, 0.0
+
+class SogCLR_Cluster_Loss2(nn.Module):
     def __init__(self, N=2900000,temperature=0.07,gamma=0.1, world_size=8, bsz=128, enable_surrogate=False, surrogate_c=1.0,lamda_rho=1.0, lamda_init=1.0,
                 n_clusters=10, optimal_cluster=False,clustering_type='kmeans',centroid_buf_size=None):
         super(SogCLR_Cluster_Loss, self).__init__()
@@ -262,7 +412,8 @@ class SogCLR_Cluster_Loss(nn.Module):
         # print("image_centroids shape:", image_centroids_new.shape,"text_centroids shape:", text_centroids_new.shape)
         # print("image_features shape:", image_features.shape,"text_features shape:", text_features.shape)
         
-        sim = torch.sum(image_full * text_full, dim=1, keepdim=True) 
+        # sim = torch.sum(image_full * text_full, dim=1, keepdim=True) 
+        sim = torch.einsum('i d, j d -> i j', image_full, text_full)
         diag_sim = torch.diagonal(sim)
 
         n_centroids = self.image_centroids.shape[0]
@@ -345,7 +496,7 @@ class SogCLR_Cluster_Loss(nn.Module):
             assert 0, "weights_text has nan."
 
         image_loss = torch.sum(weights_image * image_diffs, dim=1, keepdim=True) / (batch_size-1)
-        text_loss = torch.sum(weights_text * text_diffs, dim=1, keepdim=True) / (batch_size-1)
+        text_loss = torch.sum(weights_text * text_diffs, dim=0, keepdim=True) / (batch_size-1)
 
         total_loss = image_loss.mean() + text_loss.mean()
 
